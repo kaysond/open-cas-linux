@@ -1,6 +1,7 @@
 #
 # Copyright(c) 2022 Intel Corporation
 # Copyright(c) 2024-2025 Huawei Technologies Co., Ltd.
+# Copyright(c) 2026 Unvertical
 # SPDX-License-Identifier: BSD-3-Clause
 #
 
@@ -42,6 +43,53 @@ def test_add_core_path_by_id():
         cache = casadm.start_cache(cache_part, force=True)
         for core_dev_part in core_dev.partitions:
             cache.add_core(core_dev_part)
+
+    with TestRun.step("Check if all cores are added with proper paths."):
+        added_cores = get_cores(cache.cache_id)
+        added_cores_number = len(added_cores)
+        if added_cores_number != cores_number:
+            TestRun.fail(f"Expected {cores_number} cores, got {added_cores_number}!")
+
+        for core, partition in zip(added_cores, core_dev.partitions):
+            if partition.path != core.core_device.path:
+                TestRun.LOGGER.error(
+                    f"Paths are different and can cause problems!\n"
+                    f"Path passed as an argument to add core: {partition.path}\n"
+                    f"Path displayed by 'casadm -L': {core.core_device.path}"
+                )
+
+
+@pytest.mark.require_disk("cache", DiskTypeSet([DiskType.optane, DiskType.nand]))
+@pytest.mark.require_disk("core", DiskTypeLowerThan("cache"))
+def test_add_core_path_by_path():
+    """
+    title: Test for adding core with by-path path.
+    description: |
+        Check if core can be added to cache using by-path link.
+    pass_criteria:
+      - Cores are added to cache
+      - Cores are added to cache with the same path as given
+    """
+    with TestRun.step("Prepare partitions for cache and for cores."):
+        cache_dev = TestRun.disks["cache"]
+        cache_dev.create_partitions([Size(200, Unit.MebiByte)])
+        cache_part = cache_dev.partitions[0]
+        core_dev = TestRun.disks["core"]
+        core_dev.create_partitions([Size(400, Unit.MebiByte)] * cores_number)
+
+    with TestRun.step("Resolve core partitions to by-path links."):
+        core_by_path_links = []
+        for partition in core_dev.partitions:
+            by_path_link = get_by_path_link(partition.path)
+            if by_path_link is None:
+                pytest.skip(f"No by-path link available for {partition.path}.")
+            core_by_path_links.append(by_path_link)
+
+    with TestRun.step("Start cache and add cores using by-path links."):
+        cache = casadm.start_cache(cache_part, force=True)
+        for partition, by_path_link in zip(core_dev.partitions, core_by_path_links):
+            partition.path = by_path_link
+            cache.add_core(partition)
 
     with TestRun.step("Check if all cores are added with proper paths."):
         added_cores = get_cores(cache.cache_id)
@@ -125,6 +173,26 @@ def test_add_core_path_not_by_id():
 
     with TestRun.step("Cleanup test symlinks."):
         remove(f"{TestRun.TEST_RUN_DATA_PATH}_*", True, True)
+
+
+def get_by_path_link(path):
+    by_path_dir = "/dev/disk/by-path"
+    dev_target = readlink(path)
+    try:
+        links = TestRun.executor.run_expect_success(f"ls {by_path_dir} -1").stdout.splitlines()
+    except CmdException:
+        return None
+
+    for link in links:
+        full_path = f"{by_path_dir}/{link}"
+        # handle exception for broken links
+        try:
+            if readlink(full_path) == dev_target:
+                return full_path
+        except CmdException:
+            continue
+
+    return None
 
 
 def get_by_partuuid_link(path):
